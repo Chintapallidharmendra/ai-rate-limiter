@@ -185,18 +185,6 @@ else:
     return Response(status=429)
 ```
 
-### Distributed (Production)
-
-```python
-from distributed_rate_limiter import ProductionRedisRateLimiter
-
-limiter = ProductionRedisRateLimiter(
-    redis_nodes=['redis1:6379', 'redis2:6379', 'redis3:6379']
-)
-
-allowed = limiter.allow(user_id, model_id)
-```
-
 ## 🔄 Algorithm: Sliding Window Log
 
 Request timestamps are stored and expired automatically:
@@ -338,8 +326,7 @@ See LICENSE file.
 
 - [Sliding Window Log Algorithm](https://en.wikipedia.org/wiki/Sliding_window_protocol)
 - [Redis Sorted Sets](https://redis.io/docs/data-types/sorted-sets/)
-- [Prometheus Metrics](https://prometheus.io/docs/concepts/data_model/)
 
 ---
 
-**Status**: ✅ Production Ready | **Tested**: 80+ tests | **Performance**: 50k+ rps
+**Status**: ✅ Basic Implementaion | **Tested**: 80+ tests
