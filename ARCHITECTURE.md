@@ -11,7 +11,6 @@ Rate Limiter Project
 ├── test_rate_limiter.py (Tests for rate_limiter functions)
 ├── examples.py (Added some examples to for sample implementations)
 ├── DESIGN.md (Explains how it works)
-├── INTEGRATION.md (How to use it)
 └── README.md (Quick start)
 ```
 
@@ -179,9 +178,8 @@ Run all with: `pytest test_rate_limiter.py -v`
 
 **Using:**
 
-1. Read INTEGRATION.md (your framework)
-2. Copy code from examples.py
-3. Configure limits for your models
+1. Copy code from examples.py
+2. Configure limits for your models
 
 **Verifying:**
 
