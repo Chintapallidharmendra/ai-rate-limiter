@@ -1,19 +1,14 @@
 # AI Rate Limiter
 
-A simple rate limiter for AI systems. Works like a bouncer at a club - keeps
-track of how many requests each person makes and says "hold on, you've had
-enough for this hour!" when they go over their limit.
-
-Built over some months working on AI inference. Handles single servers well,
-scales to distributed with Redis.
+A simple rate limiter for AI systems. It keeps
+track of how many requests each person makes and stops them when they go over their limit.
 
 ## What's in Here?
 
 - **`rate_limiter.py`** - The main code (easy to read and understand)
-- **`test_rate_limiter.py`** - 80+ tests to make sure it works correctly
-- **`distributed_rate_limiter.py`** - For bigger systems using Redis
+- **`test_rate_limiter.py`** - tests to make sure it works correctly
+- **`distributed_rate_limiter.py`** - For bigger systems using Redis & LUA script
 - **`DESIGN.md`** - How the algorithm works (explained simply)
-- **`INTEGRATION.md`** - How to use it in your FastAPI, Flask, or other apps
 
 ## Quick Start
 
@@ -30,14 +25,14 @@ from rate_limiter import RateLimiter
 limiter = RateLimiter(max_requests=100, window_seconds=3600)
 
 # Check if someone can make a request
-if limiter.allow("alice", "gpt-4"):
+if limiter.allow("dharmendra", "gpt-4"):
     print("Sure, go ahead!")
 else:
     print("Sorry, you've used up your quota")
 
 # See how many requests someone has made
-count = limiter.get_request_count("alice", "gpt-4")
-print(f"Alice has used {count} out of 100 requests")
+count = limiter.get_request_count("dharmendra", "gpt-4")
+print(f"Dharmendra has used {count} out of 100 requests")
 ```
 
 ## How It Works
@@ -54,13 +49,13 @@ effective.
 
 ## Testing
 
-Want to see it in action?
+Run this command to execute the tests:
 
 ```bash
 pytest test_rate_limiter.py -v
 ```
 
-This runs 80+ tests that check:
+This runs tests that check:
 
 - Basic allow/deny behavior
 - Multiple users don't interfere with each other
@@ -80,7 +75,7 @@ limiter = MultiTierRateLimiter(
     per_model=RateLimitConfig(10000, 3600),       # All users on one model
 )
 
-allowed, reason = limiter.allow("alice", "gpt-4")
+allowed, reason = limiter.allow("dharmendra", "gpt-4")
 if not allowed:
     print(f"Denied: {reason}")
 ```
@@ -96,25 +91,24 @@ import redis
 client = redis.Redis(host='localhost', port=6379)
 limiter = RedisRateLimiter(client)
 
-if limiter.allow("alice", "gpt-4"):
+if limiter.allow("dharmendra", "gpt-4"):
     # Process the request
     pass
 ```
 
 ## Documentation
 
-- **DESIGN.md** - Detailed explanation of the algorithm and architecture
-- **INTEGRATION.md** - How to integrate this into your existing code (FastAPI, Flask, gRPC, etc.)
+- **DESIGN.md** - Detailed explanation of the algorithm and basic system design
+- **ARCHITECTURE.md** - Detailed explanation of the project architecture
 - **distributed_rate_limiter.py** - How to use it with Redis for bigger systems
 
 ## Real Examples
 
 Check out `examples.py` for:
 
-- FastAPI integration (drop it into your FastAPI app)
-- Flask integration
-- Using it with Kubernetes
-- Tracking metrics for monitoring
+- Basic Usage
+- FastAPI integration (use it in your FastAPI app)
+- Multi Tier rate limiting
 
 ## Why This Matters
 
@@ -125,19 +119,12 @@ Rate limiting protects your AI services by:
 - Giving you control over costs
 - Protecting against abuse
 
-## Performance
-
-- Handles 50,000+ requests per second (single machine)
-- Each check takes about 1-2 milliseconds
-- Uses very little memory (~500 bytes per active user)
-
 ## Questions?
 
 - **How does the algorithm work?** → Read DESIGN.md
-- **How do I use this in my code?** → Check INTEGRATION.md
 - **Does it actually work?** → Run the tests: `pytest test_rate_limiter.py -v`
 - **How do I scale it to multiple servers?** → See distributed_rate_limiter.py
 
 ---
 
-That's it! It's designed to be simple, straightforward, and actually useful.
+That's it! It's designed to be simple, straightforward, and actually useful. For an queries or suggestions. Please reach out to [Dharmendra](mailto:chintapallidharmendra@gmail.com).
