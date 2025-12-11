@@ -1,10 +1,3 @@
-"""
-AI Inference Rate Limiter - In-Memory Implementation (Phase 2)
-
-Implements a thread-safe, in-memory Sliding Window Log rate limiter
-optimized for AI model serving workloads.
-"""
-
 from typing import Dict, Tuple, List, Optional
 from threading import Lock
 from collections import defaultdict
@@ -22,7 +15,7 @@ class RateLimitConfig:
 
 class SlidingWindowEntry:
     """
-    Stores request timestamps within a sliding window for a single user-model pair.
+    Stores request timestamps within a sliding window for user-model pair.
 
     Uses a list-based implementation for simplicity. In production with higher
     throughput, could use collections.deque or a circular buffer.
@@ -39,7 +32,6 @@ class SlidingWindowEntry:
     def clean_expired(self, window_start: float) -> int:
         """
         Remove requests older than window_start.
-
         Returns: number of requests removed.
         """
         initial_count = len(self.timestamps)
@@ -62,13 +54,6 @@ class SlidingWindowEntry:
 class RateLimiter:
     """
     Thread-safe, in-memory Sliding Window Log rate limiter for AI inference.
-
-    Key features:
-    - Per-user-model-pair rate limiting
-    - Sliding window algorithm (removes expired requests automatically)
-    - Fine-grained per-key locking for concurrency
-    - Bounded memory via window expiration
-    - Configurable limits and time windows
 
     Example usage:
         limiter = RateLimiter(max_requests=100, window_seconds=3600)
@@ -95,7 +80,6 @@ class RateLimiter:
         # Storage: key -> SlidingWindowEntry
         self._windows: Dict[str, SlidingWindowEntry] = {}
 
-        # Per-key locks for thread safety
         self._locks: Dict[str, Lock] = defaultdict(Lock)
 
         # Global lock for accessing _windows dict structure
@@ -124,15 +108,9 @@ class RateLimiter:
         """
         Check if a request from user is allowed for the given model.
 
-        Implements the core Sliding Window Log algorithm:
-        1. Compute window boundaries
-        2. Remove requests outside window
-        3. Check if current count < max_requests
-        4. If allowed, record request timestamp
-
         Args:
             user_id: Unique identifier for the user/tenant
-            model_id: Unique identifier for the model (e.g., "gpt-4", "llama-70b")
+            model_id: Unique identifier for the model (e.g., "gpt-4")
 
         Returns:
             True if request is allowed, False if rate limit exceeded
@@ -147,13 +125,13 @@ class RateLimiter:
             with self._dict_lock:
                 window_entry = self._get_or_create_window(key)
 
-            # Step 1: Clean expired requests (older than window_start)
+            # Clean expired requests (older than window_start)
             window_entry.clean_expired(window_start)
 
-            # Step 2: Get current request count
+            # Get current request count
             current_count = window_entry.get_current_count(window_start)
 
-            # Step 3 & 4: Check limit and record if allowed
+            # Check limit and record if allowed
             if current_count < self.max_requests:
                 window_entry.add_request(now)
 
@@ -277,7 +255,8 @@ class MultiTierRateLimiter:
         Args:
             per_user_model: Limit per (user, model) pair
             per_model: Global limit per model across all users
-            per_tier: Limits per model tier (e.g., {"high": config, "low": config})
+            per_tier: Limits per model tier 
+                (e.g., {"high": config, "low": config})
         """
         self.per_user_model = per_user_model or RateLimitConfig(100, 3600)
         self.per_model = per_model or RateLimitConfig(10000, 3600)

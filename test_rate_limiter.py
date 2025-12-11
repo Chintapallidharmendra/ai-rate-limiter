@@ -1,12 +1,5 @@
 """
-Comprehensive test suite for AI Inference Rate Limiter.
-
-Tests cover:
-- Basic rate limiting behavior
-- Sliding window correctness
-- Concurrency and thread safety
-- Edge cases and boundary conditions
-- Multi-tier rate limiting
+Tests for the rate limiter.
 """
 
 import pytest
@@ -191,7 +184,7 @@ class TestConcurrency:
     """Tests for thread safety and concurrent access."""
 
     def test_concurrent_requests_same_user(self):
-        """Test that concurrent requests from same user are handled correctly."""
+        """Test that concurrent requests from same user are handled."""
         limiter = RateLimiter(max_requests=100, window_seconds=3600)
         results: List[bool] = []
         lock = threading.Lock()

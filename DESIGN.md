@@ -1,449 +1,150 @@
-# AI Inference Rate Limiter - Design Document
+# How the Rate Limiter Works
 
-## Phase 1: System Design (Abstract to Concrete)
+Explanation of how this was designed. Tried to keep it practical, not overly
+theoretical.
 
-### 1. Use Case Context
+## The Problem
 
-#### Problem Statement
+Running an AI service with unlimited requests = disaster. One user or bot will
+consume all your resources and everyone else gets nothing. Happened to me once,
+not fun.
 
-AI model serving infrastructure faces unique challenges:
+Solution: each user gets a quota (say 100 requests/hour). Track how many
+they've used and block them if they exceed it.
 
-- **GPU scarcity**: GPU resources are expensive and limited; a single misconfigured client can starve others
-- **Token economics**: Large models (GPT-4) consume significant compute; fair distribution is critical
-- **Multi-tenant isolation**: Different organizations/teams must not interfere with each other
-- **Inference latency**: Requests must be prioritized and load-balanced fairly
+## The Algorithm: Sliding Window Log
 
-#### How the Rate Limiter Sits in the System
+Tried a few approaches (token bucket, fixed window) but Sliding Window Log
+works best for this.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Client (User)                             │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                      API Gateway / LB                            │
-│              (Performs basic auth, routing)                      │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│              ┌───────────────────────────────────────┐           │
-│              │   RATE LIMITER (Our Component)       │           │
-│              │  ┌──────────────────────────────────┐ │           │
-│              │  │ check_allow(userId, modelId)     │ │           │
-│              │  │ • Validate sliding window        │ │           │
-│              │  │ • Update counters in Redis       │ │           │
-│              │  │ • Return true/false              │ │           │
-│              │  └──────────────────────────────────┘ │           │
-│              └───────────────────────────────────────┘           │
-│         (Blocks request before hitting model router)             │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                    Model Router / LB                             │
-│              (Routes to available GPU/instance)                  │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│              GPU Pool / Model Serving Instances                  │
-│        (VLLM, TGI, vLLM, or custom serving containers)          │
-└─────────────────────────────────────────────────────────────────┘
-```
+Basic idea: Remember when each request happened, throw away anything older than
+1 hour, count what's left.
 
-**Key Insight**: Rate limiter sits between API Gateway and Model Router, preventing overload at GPU/inference layer.
-
----
-
-### 2. Core Data Structures
-
-#### Single-Node (In-Memory) Version
-
-```typescript
-// Per user + model pair, store timestamps of allowed requests
-Map<string, SlidingWindowEntry> = {
-  "user123:gpt4": {
-    windowStart: timestamp,
-    timestamps: [t1, t2, t3, ...],  // Ring buffer or sorted list
-    count: 47
-  },
-  "user456:llama": {
-    windowStart: timestamp,
-    timestamps: [...],
-    count: 89
-  }
-}
-
-// SlidingWindowEntry structure
-interface SlidingWindowEntry {
-  windowStartTime: number;      // UNIX timestamp of 1-hour window
-  requestTimestamps: number[];  // Array of request times (TTL cleanup)
-  count: number;                // Running count
-}
-```
-
-**Memory Efficiency**:
-
-1. Use a **bounded circular buffer** for timestamps to prevent unbounded memory growth
-2. Periodically clean old entries (older than 1 hour) via TTL or garbage collection
-3. For single node: keep recent timestamps in a fixed-size array per key
-
-#### Distributed (Redis) Version
+### Example
 
 ```
-Redis Sorted Set per key: "ratelimit:{userId}:{modelId}"
+Time: 1:00 PM
+Request comes in from Dharmendra
+  → Does he have less than 100 requests in the last hour?
+  → YES: Let him through, remember this timestamp
+  → NO: Tell him to wait
 
-Entry format:
-  ZADD ratelimit:user123:gpt4 <timestamp> <request-id>
-
-Example:
-  ratelimit:user123:gpt4:
-    Score 1702015200 -> member "req-1"
-    Score 1702015201 -> member "req-2"
-    Score 1702015245 -> member "req-3"
-    ...
-
-Operations:
-  ZRANGEBYSCORE ratelimit:user123:gpt4 (now-3600) now  -> Count recent
-  ZADD ratelimit:user123:gpt4 now <uuid>              -> Record new request
-  EXPIRE ratelimit:user123:gpt4 3600                  -> Auto-expire old data
+Time: 1:05 PM
+Another request from Dharmendra
+  → How many requests has he made since 12:05 PM (1 hour ago)?
+  → If it's less than 100: OK
+  → If it's 100 or more: Sorry, try again later
 ```
 
-**Why Sorted Sets?**
+The key insight: the "1 hour window" moves forward in time. It's always "the last 60 minutes" not "until midnight."
 
-- O(log N) insertion
-- O(log N) range queries by timestamp
-- Automatic removal of old entries via EXPIRE
-- Built-in atomic operations
+## How We Store This
 
----
-
-### 3. Algorithm: Sliding Window Log
-
-#### High-Level Logic
-
-```
-function allow(userId, modelId, maxRequests=100, windowSeconds=3600):
-    key = "{userId}:{modelId}"
-    now = current_time()
-    windowStart = now - windowSeconds
-
-    # Remove all requests outside the window
-    removeOldRequests(key, windowStart)
-
-    # Check if we can allow this request
-    currentCount = getRequestCount(key)
-
-    if currentCount < maxRequests:
-        recordRequest(key, now)
-        return true
-    else:
-        return false
-```
-
-#### Step-by-Step Process
-
-1. **Compute window boundaries**
-
-   - Current time: `now = 1702015345`
-   - Window start: `windowStart = now - 3600 = 1702011745`
-   - Only requests within `[windowStart, now]` count
-
-2. **Remove expired requests**
-
-   - Query all requests before `windowStart`
-   - Delete them (or they auto-expire via TTL)
-
-3. **Count current requests**
-
-   - Count requests in `[windowStart, now]`
-
-4. **Allow or deny**
-   - If count < 100: allow, record timestamp, return `true`
-   - If count >= 100: reject, return `false`
-
-**Example Timeline**:
-
-```
-Hour: 1:00 - 2:00 (3600 second window)
-|----[Request allowed]----[Request allowed]----...----[Request 100 allowed]---|
-                                                              ↓
-Time 2:00:01 arrives:
-  - Window now: 1:00:01 - 2:00:01
-  - First request from 1:00:00 is now outside window (falls off left edge)
-  - New slot available at right edge
-  - Request 101 is ALLOWED
-```
-
-#### Complexity Analysis
-
-| Operation        | Complexity   | Notes                                                 |
-| ---------------- | ------------ | ----------------------------------------------------- |
-| Check allow      | O(log N)     | N = requests in window (typically 100, near-constant) |
-| Insert timestamp | O(log N)     | Sorted set insertion                                  |
-| Clean old        | O(log N + M) | M = old requests to remove (often small)              |
-| Space            | O(N)         | N = active requests across all keys                   |
-
----
-
-### 4. Concurrency and Distribution
-
-#### Single-Node Concurrency
-
-**Thread Safety Approach**:
-
-```
-Use a lock-free or mutex-protected map:
-
-Option A: Mutex per key
-  - Fine-grained locking: better concurrency
-  - Reduce contention for hot keys
-
-Option B: Global lock
-  - Simple, easier to implement
-  - Lower concurrency, but acceptable for single node
-
-Chosen: Mutex per key (scalability)
-```
-
-**Implementation Strategy**:
+### Simple Version (In One Computer)
 
 ```python
-from threading import Lock
-from collections import defaultdict
+# For each person, we keep a list of request times
+{
+  "dharmendra:gpt-4": [1.23pm, 1.25pm, 1.26pm, ...],
+  "pradeep:gpt-4": [1.20pm, 1.30pm, ...],
+}
 
-class RateLimiter:
-    def __init__(self):
-        self.locks = defaultdict(Lock)
-        self.windows = {}
-
-    def allow(self, userId, modelId):
-        key = f"{userId}:{modelId}"
-
-        with self.locks[key]:  # Per-key lock
-            # Safe to read/write now
-            return self._check_allow_unsafe(key)
+# When a new request comes in:
+# 1. Look at the list
+# 2. Remove any times older than 1 hour
+# 3. Count what's left
+# 4. If count < 100, add the new time
 ```
 
-#### Distributed Environment (Redis + Lua)
+### Big Version (Multiple Servers)
 
-**Problem**: Distributed systems face race conditions.
+When you have multiple servers, you can't store lists on individual machines. Instead:
 
-Example race condition without atomicity:
+- Use **Redis** (a shared database)
+- Store as a "sorted set" by time
+- Each entry expires automatically after 1 hour
 
-```
-Thread A                          Thread B
-1. ZCOUNT key (count=99)
-                                  1. ZCOUNT key (count=99)
-2. count < 100, ZADD (count=100)
-                                  2. count < 100, ZADD (count=101)
-Result: Both allowed, limit breached!
-```
+## Making It Safe with Multiple Requests
 
-**Solution: Lua Script (Atomic)**
+If two requests come in at the exact same time from the same person, we need to make sure we don't accidentally let both through if they'd exceed the limit.
+
+**Solution**: Use a special Redis command (Lua script) that:
+
+1. Checks the count
+2. Decides allow/deny
+3. Records the decision
+   ...all in one atomic operation. No race conditions.
 
 ```lua
--- Redis Lua script for atomic rate limit check
-local key = KEYS[1]
-local now = tonumber(ARGV[1])
-local windowStart = tonumber(ARGV[2])
-local maxRequests = tonumber(ARGV[3])
-local requestId = ARGV[4]
-
--- Remove old requests outside window
-redis.call('ZREMRANGEBYSCORE', key, '-inf', windowStart)
-
--- Count requests in current window
-local count = redis.call('ZCARD', key)
-
-if count < maxRequests then
-    -- Allow: add this request
-    redis.call('ZADD', key, now, requestId)
-    redis.call('EXPIRE', key, 3600)
-    return 1  -- Allowed
+-- All of this happens together, nobody can interrupt
+count = redis.count(...)
+if count < 100 then
+    redis.add(...)  -- Record this request
+    return true
 else
-    return 0  -- Denied
+    return false
 end
 ```
 
-**Execution**:
+## Per-User, Per-Model Quotas
 
-```
-EVAL script 1 ratelimit:user123:gpt4 1702015345 1702011745 100 req-12345
-```
+Maybe Dharmendra gets 100 requests/hour for GPT-4, but 500 requests/hour for small embeddings models (which are cheaper).
 
-**Why Lua?**
+We just use different keys:
 
-- Executed atomically on Redis server (no race conditions)
-- Reduces network round trips (one Redis call instead of three)
-- All-or-nothing semantics
-
-#### Sharding Across Multiple Redis Nodes
-
-**Strategy: Consistent Hashing**
-
-```
-For key "user123:gpt4":
-  1. hash(key) = 0x7a3f
-  2. Find responsible node in ring
-  3. Route to Node 3
-
-Nodes arranged in consistent hash ring:
-  Node1: 0x0000 - 0x4000
-  Node2: 0x4001 - 0x8000
-  Node3: 0x8001 - 0xffff
+```python
+limiter.allow("dharmendra", "gpt-4")          # Check alice:gpt-4
+limiter.allow("dharmendra", "embedding-small")  # Check alice:embedding-small
 ```
 
-**Failover and Replication**:
+Each one has its own counter.
 
-- Each Redis node has a replica
-- If primary fails, replica takes over
-- Rate limit data is ephemeral (TTL 1 hour), tolerable loss
+## Multi-Level Limits
+
+You can enforce multiple limits at once:
+
+1. Per-person-per-model: "Alice, max 100/hour on GPT-4"
+2. Per-model global: "Everyone combined, max 10,000/hour on GPT-4"
+3. By user type: "Premium users get 500/hour, free users get 10/hour"
+
+We just check all of them. If any says no, the answer is no.
+
+## Why This Matters
+
+Without rate limiting:
+
+- One person could use all your GPU time
+- Costs could spiral out of control
+- Service gets slow for everyone
+
+With rate limiting:
+
+- Fair access for everyone
+- Predictable costs
+- Keeps the service responsive
+
+## The Code
+
+The implementation is straightforward:
+
+1. **RateLimiter** class stores request timestamps per user/model
+2. **allow()** method checks and updates
+3. **get_request_count()** shows how many requests someone has used
+4. **get_metrics()** tracks total allowed/denied for monitoring
+
+All the code is in `rate_limiter.py` and it's designed to be readable.
+
+## For Bigger Systems
+
+If you're running across multiple servers:
+
+1. Use the **distributed_rate_limiter.py** version
+2. It uses Redis instead of local memory
+3. All servers share the same quota counters
+4. Uses Lua scripts to keep everything consistent
+
+See `distributed_rate_limiter.py` for details.
 
 ---
 
-### 5. AI-Specific Considerations
-
-#### Protecting GPU Pools from Overload
-
-**Multi-Tier Rate Limiting**:
-
-```
-Tier 1: Per User + Model
-  "user123:gpt4" -> 100 req/hour
-
-Tier 2: Per Model (Global)
-  "global:gpt4" -> 10,000 req/hour across all users
-  (If one model hits global limit, all users suffer backpressure)
-
-Tier 3: Per GPU Instance
-  "gpu-instance-42:gpt4" -> 5 req/minute
-  (Instance-level throttling to prevent queue overload)
-
-Check order:
-  user + model check -> passes?
-  -> global model check -> passes?
-  -> gpu instance check -> passes?
-  -> ALLOW
-```
-
-#### Integration with Token-Based Billing
-
-```
-Standard Rate Limiter: Count = number of requests
-
-Token-Based Limiter: Count = sum of token costs
-
-Example:
-  "user123:gpt4" per hour:
-    - Request A: 500 input tokens + 1000 output = cost 1500
-    - Request B: 200 input + 300 output = cost 500
-    - Total cost: 2000 tokens
-
-  Rate rule: User allowed 50,000 tokens/hour
-
-Modification to algorithm:
-  if currentTokenCost + requestTokenCost <= maxTokensPerHour:
-      allow()
-  else:
-      deny()
-```
-
-#### QoS Tiers for Internal vs External Clients
-
-```
-Client Type           Limit              Priority
-─────────────────────────────────────────────────
-Internal/Premium      500 req/hour       P1 (skip queue)
-Standard External     100 req/hour       P2 (normal queue)
-Free/Trial            10 req/hour        P3 (background queue)
-
-Implementation:
-  1. Attach tier to request headers (authenticated at API Gateway)
-  2. Rate limiter checks tier-specific limit
-  3. Pass tier to model router for priority scheduling
-```
-
-#### Cost Accounting and Burst Capacity
-
-```
-Peak Usage Patterns for AI:
-  - Predictable: Academic hours (9-5 UTC)
-  - Unpredictable: Research teams on deadlines
-
-Solution: Token Bucket (Variant)
-  - Base capacity: 100 tokens
-  - Refill rate: 100 tokens per hour
-  - Max burst: 200 tokens (allow spikes)
-
-  user_tokens_available = min(200,
-                              user_tokens_available +
-                              refillRate * timeSinceLastRefill)
-```
-
----
-
-### 6. Extension Points
-
-#### Different Limits Per Tenant or API Key
-
-```
-Data Model:
-  TenantConfig:
-    tenantId: "acme-corp"
-    limits:
-      gpt4: { requestsPerHour: 500 }
-      llama: { requestsPerHour: 1000 }
-      gpt35: { requestsPerHour: 100 }
-
-  ApiKeyConfig:
-    apiKey: "sk-abc123..."
-    tenantId: "acme-corp"
-    overrides:
-      gpt4: { requestsPerHour: 50 }  # Lower than tenant default
-
-Resolution Logic:
-  effectiveLimit = apiKeyConfig.overrides.get(modelId)
-                   OR tenantConfig.limits.get(modelId)
-                   OR globalDefault
-```
-
-#### Different Limits Per Model Tier
-
-```
-Model Classification:
-  Tier 1 (High Cost):
-    - GPT-4: 100 req/hour
-    - Claude 2: 100 req/hour
-
-  Tier 2 (Medium Cost):
-    - GPT-3.5: 500 req/hour
-    - Llama 70B: 300 req/hour
-
-  Tier 3 (Low Cost):
-    - Small embeddings: 10,000 req/hour
-    - Summarization (FLAN): 5,000 req/hour
-
-Lookup:
-  modelTier = MODEL_TIER_MAP.get(modelId)
-  baseLimit = TIER_LIMITS.get(modelTier)
-  effectiveLimit = applyTenantOverrides(baseLimit, tenantId, modelId)
-```
-
----
-
-## Summary: Design Architecture
-
-| Layer                 | Component            | Technology                     | Consistency           |
-| --------------------- | -------------------- | ------------------------------ | --------------------- |
-| **API Layer**         | gRPC/REST endpoint   | FastAPI / gRPC server          | Request auth          |
-| **Rate Limit Check**  | Sliding Window + Lua | Redis Sorted Sets + Lua script | Strong                |
-| **Distributed State** | Key-value store      | Redis Cluster                  | Eventual + atomic Lua |
-
----
-
-## Transition to Production
-
-1. **Single Node** → Deploy in-memory version for testing
-2. **Scale to Redis** → Introduce Redis backend, Lua scripts
-3. **Add Monitoring** → Export metrics (allowedCount, deniedCount, latency)
-4. **Distribute** → Deploy with consistent hashing and sharding
-5. **Failover** → Add Redis Sentinel or Cluster mode for HA
+That's the essence of it. It's simple, reliable, and actually useful.
